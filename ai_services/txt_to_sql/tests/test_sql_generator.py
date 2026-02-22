@@ -1,21 +1,139 @@
-from txt_to_sql.prompt_builder import build_sql_prompt
-from txt_to_sql.schema_validator import build_role_schema
-from txt_to_sql.sql_generator import generate_sql
+from types import SimpleNamespace
+
+import pytest
+
+from txt_to_sql import sql_generator as sg
 
 
-def test_sql_generation():
-    role = "sales"
-    question = "get Monthly revenue trend per product category"
-
-    schema = build_role_schema(role)
-    prompt = build_sql_prompt(question, role, schema)
-
-    sql = generate_sql(prompt)
-
-    print("\n----- GENERATED SQL -----\n")
-    print(sql)
-    print("\n-------------------------\n")
+@pytest.fixture(autouse=True)
+def reset_client_cache():
+    sg._client = None
+    yield
+    sg._client = None
 
 
-if __name__ == "__main__":
-    test_sql_generation()
+def test_get_client_requires_api_key(monkeypatch):
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+
+    with pytest.raises(sg.SQLGenerationError, match="GEMINI_API_KEY is missing"):
+        sg._get_client()
+
+
+def test_get_client_caches_client(monkeypatch):
+    created = []
+
+    class FakeClient:
+        def __init__(self, api_key):
+            self.api_key = api_key
+            created.append(api_key)
+
+    monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+    monkeypatch.setattr(sg.genai, "Client", FakeClient)
+
+    first = sg._get_client()
+    second = sg._get_client()
+
+    assert first is second
+    assert created == ["fake-key"]
+
+
+def test_get_client_wraps_client_init_exception(monkeypatch):
+    class FakeClient:
+        def __init__(self, api_key):
+            raise RuntimeError("init failed")
+
+    monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+    monkeypatch.setattr(sg.genai, "Client", FakeClient)
+
+    with pytest.raises(
+        sg.SQLGenerationError,
+        match="Gemini client initialization failed: RuntimeError",
+    ):
+        sg._get_client()
+
+
+@pytest.mark.parametrize("prompt", ["", "   ", None, 123])
+def test_generate_sql_rejects_empty_prompt(prompt):
+    with pytest.raises(sg.SQLGenerationError, match="Prompt is empty"):
+        sg.generate_sql(prompt)
+
+
+def test_generate_sql_success(monkeypatch):
+    calls = []
+
+    class FakeModels:
+        def generate_content(self, **kwargs):
+            calls.append(kwargs)
+            return SimpleNamespace(text="  SELECT id FROM users  ")
+
+    class FakeClient:
+        def __init__(self, api_key):
+            self.api_key = api_key
+            self.models = FakeModels()
+
+    monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+    monkeypatch.setattr(sg.genai, "Client", FakeClient)
+
+    sql = sg.generate_sql("list all users")
+
+    assert sql == "SELECT id FROM users"
+    assert len(calls) == 1
+    assert calls[0]["model"] == "models/gemini-2.5-flash"
+    assert calls[0]["contents"] == "list all users"
+    assert calls[0]["config"]["temperature"] == 0.1
+
+
+def test_generate_sql_wraps_client_exception(monkeypatch):
+    class FakeModels:
+        def generate_content(self, **kwargs):
+            raise RuntimeError("boom")
+
+    class FakeClient:
+        def __init__(self, api_key):
+            self.models = FakeModels()
+
+    monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+    monkeypatch.setattr(sg.genai, "Client", FakeClient)
+
+    with pytest.raises(sg.SQLGenerationError, match="Gemini generation failed: RuntimeError"):
+        sg.generate_sql("list all users")
+
+
+@pytest.mark.parametrize(
+    "model_text",
+    ["", "   "],
+)
+def test_generate_sql_rejects_empty_response(monkeypatch, model_text):
+    class FakeModels:
+        def generate_content(self, **kwargs):
+            return SimpleNamespace(text=model_text)
+
+    class FakeClient:
+        def __init__(self, api_key):
+            self.models = FakeModels()
+
+    monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+    monkeypatch.setattr(sg.genai, "Client", FakeClient)
+
+    with pytest.raises(sg.SQLGenerationError, match="Empty response from LLM"):
+        sg.generate_sql("list all users")
+
+
+@pytest.mark.parametrize(
+    "response_payload",
+    [SimpleNamespace(text=None), SimpleNamespace(text=123), SimpleNamespace()],
+)
+def test_generate_sql_rejects_invalid_response_text_type(monkeypatch, response_payload):
+    class FakeModels:
+        def generate_content(self, **kwargs):
+            return response_payload
+
+    class FakeClient:
+        def __init__(self, api_key):
+            self.models = FakeModels()
+
+    monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+    monkeypatch.setattr(sg.genai, "Client", FakeClient)
+
+    with pytest.raises(sg.SQLGenerationError, match="Invalid response type from LLM"):
+        sg.generate_sql("list all users")

@@ -1,20 +1,60 @@
+import pytest
 from txt_to_sql.prompt_builder import build_sql_prompt
-from txt_to_sql.schema_validator import build_role_schema
-
-def test_prompt_builder():
-    role = "sales"
-    question = "Total revenue per product category"
-
-    schema = build_role_schema(role)
-    prompt = build_sql_prompt(question=question, role=role, schema=schema)
-
-    print("\n ----------generated prompt --------------")
-    print(prompt)
-    print("--------------------------------------------")
-
-    assert question in prompt
-    assert role in prompt
 
 
-if __name__ == "__main__":
-    test_prompt_builder()
+ROLE_SCHEMA = {
+    "users": {
+        "id": "INT",
+        "name": "TEXT"
+    },
+    "orders": {
+        "id": "INT",
+        "user_id": "INT",
+        "price": "DECIMAL"
+    }
+}
+
+
+def test_prompt_contains_question():
+    prompt = build_sql_prompt(
+        question="List all users",
+        schema=ROLE_SCHEMA,
+        db_type="postgres"
+    )
+
+    assert "List all users" in prompt
+
+
+def test_prompt_contains_schema_tables():
+    prompt = build_sql_prompt(
+        question="List all users",
+        schema=ROLE_SCHEMA,
+        db_type="postgres"
+    )
+
+    assert "users" in prompt
+    assert "orders" in prompt
+    assert "id (INT)" in prompt
+    assert "price (DECIMAL)" in prompt
+
+
+def test_prompt_contains_db_specific_functions():
+    prompt = build_sql_prompt(
+        question="Count users",
+        schema=ROLE_SCHEMA,
+        db_type="postgres"
+    )
+
+    assert "COUNT" in prompt
+    assert "SUM" in prompt
+
+
+def test_prompt_returns_string():
+    prompt = build_sql_prompt(
+        question="List users",
+        schema=ROLE_SCHEMA,
+        db_type="postgres"
+    )
+
+    assert isinstance(prompt, str)
+    assert len(prompt) > 0

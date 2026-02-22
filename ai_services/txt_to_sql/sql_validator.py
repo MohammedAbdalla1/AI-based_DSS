@@ -1,0 +1,350 @@
+"""
+sql_validator.py
+
+AST-based SQL validation for LLM-generated queries using sqlglot.
+The validator is strict and fails closed to preserve security.
+
+SaaS-ready:
+- Multi-dialect support
+- Nested schema support (table -> {column -> type})
+- Strict column qualification
+- Dialect-aware function validation
+- Returns normalized qualified SQL
+"""
+
+from __future__ import annotations
+
+from typing import Dict, Set
+
+from sqlglot import exp, parse
+from sqlglot.errors import ParseError
+from sqlglot.optimizer.qualify import qualify
+
+
+class SQLValidationError(Exception):
+    """Raised when SQL fails validation rules."""
+
+
+# =========================================================
+# Dialect-Specific Allowed Functions
+# =========================================================
+
+ALLOWED_FUNCTIONS = {
+    "postgres": {
+        "sum", "count", "avg", "min", "max",
+        "coalesce", "nullif", "round", "cast",
+        "lower", "upper", "trim", "length", "substring",
+        "abs", "floor", "ceil",
+        "date_trunc", "timestamp_trunc", "date_part", "extract",
+        "now", "current_timestamp", "current_date",
+        "case", "lag", "row_number", "rank", "dense_rank",
+    },
+    "mysql": {
+        "sum", "count", "avg", "min", "max",
+        "coalesce", "nullif", "round", "cast",
+        "lower", "upper", "trim", "length", "substring",
+        "abs", "floor", "ceil",
+        "now", "curdate", "current_date", "date_format", "time_to_str",
+        "year", "month", "day", "ts_or_ds_to_date",
+        "case", "lag", "row_number", "rank", "dense_rank",
+    },
+    "sqlserver": {
+        "sum", "count", "avg", "min", "max",
+        "coalesce", "nullif", "round", "cast",
+        "lower", "upper", "trim", "length", "len", "substring",
+        "abs", "floor", "ceil", "ceiling",
+        "getdate", "current_timestamp",
+        "dateadd", "date_add", "datediff", "datepart", "extract",
+        "time_str_to_time",
+        "case", "lag", "row_number", "rank", "dense_rank",
+    },
+}
+
+
+# =========================================================
+# Main Validation Entry
+# =========================================================
+
+def validate_sql(
+    sql: str,
+    role_schema: Dict[str, Dict[str, str]],
+    dialect: str = "postgres",
+) -> str:
+    """
+    Validate a SQL query against strict safety and schema rules.
+
+    Args:
+        sql: LLM-generated SQL string.
+        role_schema: allowed tables/columns (nested schema).
+        dialect: SQL dialect.
+
+    Returns:
+        Qualified and normalized SQL string.
+
+    Raises:
+        SQLValidationError
+    """
+
+    if not sql or not sql.strip():
+        raise SQLValidationError("SQL is empty")
+
+    raw = sql.strip()
+
+    _reject_markdown_or_comments(raw)
+
+    sqlglot_dialect = _to_sqlglot_dialect(dialect)
+
+    try:
+        statements = parse(raw, read=sqlglot_dialect)
+    except ParseError as exc:
+        raise SQLValidationError(f"SQL parse error: {exc}")
+
+    if len(statements) != 1:
+        raise SQLValidationError("Multiple SQL statements are not allowed")
+
+    statement = statements[0]
+
+    # Enforce wildcard policy before qualify() can expand SELECT * to explicit columns.
+    _reject_wildcards(statement)
+
+    # STRICT qualification (fail on unresolved or ambiguous columns)
+    try:
+        qualified = qualify(
+            statement,
+            schema=role_schema,
+            validate_qualify_columns=True,
+        )
+    except Exception as exc:
+        raise SQLValidationError(f"Schema resolution error: {exc}")
+
+    _validate_statement(qualified, role_schema, dialect)
+
+    # Return normalized SQL
+    return qualified.sql(dialect=sqlglot_dialect)
+
+
+# =========================================================
+# Structural Validations
+# =========================================================
+
+def _reject_markdown_or_comments(sql: str) -> None:
+    if "```" in sql or "`" in sql:
+        raise SQLValidationError("Markdown or code formatting is not allowed in SQL")
+    if "--" in sql or "/*" in sql or "*/" in sql:
+        raise SQLValidationError("SQL comments are not allowed")
+
+
+def _require_select_only(statement: exp.Expression) -> None:
+    if not isinstance(statement, exp.Select):
+        raise SQLValidationError("Only SELECT queries are allowed")
+
+    if statement.find(exp.Insert) or statement.find(exp.Update) or statement.find(exp.Delete):
+        raise SQLValidationError("Only SELECT queries are allowed")
+
+
+def _reject_select_into(statement: exp.Expression) -> None:
+    if statement.find(exp.Into):
+        raise SQLValidationError("SELECT INTO is not allowed")
+
+
+def _reject_wildcards(statement: exp.Expression) -> None:
+    for star in statement.find_all(exp.Star):
+        # Allow COUNT(*)
+        if isinstance(star.parent, exp.Count):
+            continue
+        raise SQLValidationError(
+            "Wildcard '*' is not allowed; select explicit columns"
+        )
+
+
+def _select_has_no_from(statement: exp.Expression) -> bool:
+    if not isinstance(statement, exp.Select):
+        return False
+    # sqlglot stores FROM as "from_" in parsed/qualified Select nodes.
+    return statement.args.get("from") is None and statement.args.get("from_") is None
+
+
+# =========================================================
+# Core Validation
+# =========================================================
+
+def _validate_statement(
+    statement: exp.Expression,
+    role_schema: Dict[str, Dict[str, str]],
+    dialect: str,
+) -> None:
+    _validate_ctes(statement)
+
+    if statement.find(exp.Union):
+        raise SQLValidationError("UNION and UNION ALL are not supported")
+
+    _require_select_only(statement)
+    _reject_select_into(statement)
+    _reject_wildcards(statement)
+
+    if _select_has_no_from(statement):
+        raise SQLValidationError("SELECT without FROM is not allowed")
+
+    _validate_functions(statement, dialect)
+    _validate_schema_access(statement, role_schema)
+
+
+# =========================================================
+# Function Validation
+# =========================================================
+
+def _validate_ctes(statement: exp.Expression) -> None:
+    with_clause = statement.args.get("with") or statement.args.get("with_")
+    if not with_clause:
+        return
+
+    if with_clause.args.get("recursive"):
+        raise SQLValidationError("Recursive CTEs (WITH RECURSIVE) are not supported")
+
+
+def _to_sqlglot_dialect(dialect: str) -> str:
+    dialect_normalized = dialect.lower()
+    if dialect_normalized == "sqlserver":
+        return "tsql"
+    return dialect_normalized
+
+
+def _validate_functions(statement: exp.Expression, dialect: str) -> None:
+    dialect_key = dialect.lower()
+    if dialect_key == "tsql":
+        dialect_key = "sqlserver"
+
+    allowed = ALLOWED_FUNCTIONS.get(
+        dialect_key,
+        {"sum", "count", "avg", "min", "max"},
+    )
+
+    # Block schema-qualified functions (e.g., pg_catalog.now())
+    for prop in statement.find_all(exp.Property):
+        if isinstance(prop.this, exp.Func):
+            raise SQLValidationError(
+                f"Schema-qualified functions are not allowed: '{prop.sql()}'"
+            )
+
+    # Handle parser outputs like pg_catalog.now() represented as Dot(..., Func)
+    for dot in statement.find_all(exp.Dot):
+        if isinstance(dot.expression, exp.Func):
+            raise SQLValidationError(
+                f"Schema-qualified functions are not allowed: '{dot.sql()}'"
+            )
+
+    for func in statement.find_all(exp.Func):
+        # Logical connectors are not function calls and should not be checked
+        # against dialect allowlists.
+        if isinstance(func, exp.Connector):
+            continue
+
+        # CASE expressions are represented with internal IF nodes in sqlglot.
+        if isinstance(func, exp.If) and isinstance(func.parent, exp.Case):
+            continue
+
+        canonical_name = func.sql_name()
+        raw_name = getattr(func, "name", None)
+
+        candidates = {
+            name.lower()
+            for name in (canonical_name, raw_name)
+            if isinstance(name, str) and name.strip()
+        }
+
+        if not candidates:
+            raise SQLValidationError("Unknown SQL function detected")
+
+        for name in candidates:
+            if "." in name:
+                raise SQLValidationError("Schema-qualified functions are not allowed")
+
+        if not any(name in allowed for name in candidates):
+            # Prefer canonical sqlglot name in the error for consistency.
+            rejected = (canonical_name or raw_name or "unknown").lower()
+            raise SQLValidationError(f"Function not allowed: '{rejected}'")
+
+
+# =========================================================
+# Schema Validation
+# =========================================================
+
+def _validate_schema_access(
+    statement: exp.Expression,
+    role_schema: Dict[str, Dict[str, str]],
+) -> None:
+
+    allowed_tables: Set[str] = set(role_schema.keys())
+    alias_to_table: Dict[str, str] = {}
+    cte_names: Set[str] = set()
+    derived_aliases: Set[str] = set()
+    select_aliases: Set[str] = set()
+
+    if isinstance(statement, exp.Select):
+        for expression in statement.expressions:
+            if isinstance(expression, exp.Alias) and expression.alias:
+                select_aliases.add(expression.alias)
+
+    for cte in statement.find_all(exp.CTE):
+        if cte.alias:
+            cte_names.add(cte.alias)
+
+    for table in statement.find_all(exp.Table):
+        name = table.name
+
+        if not name:
+            raise SQLValidationError("Table name is missing")
+
+        if table.db and table.db.lower() in {"pg_catalog", "information_schema"}:
+            raise SQLValidationError(
+                f"Access to system schema is not allowed: '{table.db}'"
+            )
+
+        if name in cte_names:
+            alias = table.alias
+            if alias:
+                alias_to_table[alias] = name
+            continue
+
+        if name not in allowed_tables:
+            raise SQLValidationError(
+                f"Table not allowed for this role: '{name}'"
+            )
+
+        alias = table.alias
+        if alias:
+            alias_to_table[alias] = name
+
+    # Allow columns that come from derived-table aliases (subqueries in FROM/JOIN).
+    for subquery in statement.find_all(exp.Subquery):
+        if subquery.alias:
+            derived_aliases.add(subquery.alias)
+
+    virtual_sources = cte_names | derived_aliases
+
+    for column in statement.find_all(exp.Column):
+        table = column.table
+
+        # After qualify(), every column should have table
+        if not table:
+            # SELECT aliases are valid in ORDER BY / GROUP BY clauses.
+            if column.name in select_aliases:
+                continue
+            raise SQLValidationError(
+                f"Unresolved column detected: '{column.name}'"
+            )
+
+        resolved_table = alias_to_table.get(table, table)
+
+        if resolved_table in virtual_sources:
+            continue
+
+        if resolved_table not in role_schema:
+            raise SQLValidationError(
+                f"Unauthorized table access: '{table}'"
+            )
+
+        if column.name not in role_schema[resolved_table]:
+            raise SQLValidationError(
+                f"Unauthorized access to {resolved_table}.{column.name}"
+            )
