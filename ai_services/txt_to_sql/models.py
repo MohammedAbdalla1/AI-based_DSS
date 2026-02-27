@@ -34,7 +34,6 @@ class TextToSQLRequest(BaseModel):
 
     question: str = Field(
         ...,
-        min_length=1,
         description="Natural language question from the user."
     )
 
@@ -108,6 +107,7 @@ class TextToSQLSuccess(BaseModel):
 class TextToSQLError(BaseModel):
     status: Literal["error"]
     error_code: str
+    error_subcode: Optional[str] = None
     message: str
 
 

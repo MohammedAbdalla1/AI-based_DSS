@@ -5,7 +5,14 @@ from google import genai
 
 class SQLGenerationError(Exception):
     """Raised when the LLM fails to generate SQL."""
-    pass
+
+    def __init__(self, message: str, subcode: str = "UNKNOWN"):
+        super().__init__(message)
+        self.subcode = subcode
+
+
+def _generation_error(subcode: str, message: str) -> SQLGenerationError:
+    return SQLGenerationError(message=message, subcode=subcode)
 
 
 _client = None  # cached client
@@ -37,13 +44,14 @@ def _get_client():
 
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
-        raise SQLGenerationError("GEMINI_API_KEY is missing")
+        raise _generation_error("MISSING_API_KEY", "GEMINI_API_KEY is missing")
 
     try:
         _client = genai.Client(api_key=api_key)
     except Exception as e:
-        raise SQLGenerationError(
-            f"Gemini client initialization failed: {type(e).__name__}"
+        raise _generation_error(
+            "CLIENT_INIT_FAILED",
+            f"Gemini client initialization failed: {type(e).__name__}",
         ) from e
 
     return _client
@@ -51,7 +59,7 @@ def _get_client():
 
 def generate_sql(prompt: str) -> str:
     if not isinstance(prompt, str) or not prompt.strip():
-        raise SQLGenerationError("Prompt is empty")
+        raise _generation_error("PROMPT_EMPTY", "Prompt is empty")
 
     client = _get_client()
 
@@ -62,16 +70,17 @@ def generate_sql(prompt: str) -> str:
             config={"temperature": 0.1},
         )
     except Exception as e:
-        raise SQLGenerationError(
-            f"Gemini generation failed: {type(e).__name__}"
+        raise _generation_error(
+            "PROVIDER_FAILURE",
+            f"Gemini generation failed: {type(e).__name__}",
         ) from e
 
     text = getattr(response, "text", None)
     if not isinstance(text, str):
-        raise SQLGenerationError("Invalid response type from LLM")
+        raise _generation_error("INVALID_RESPONSE_TYPE", "Invalid response type from LLM")
 
     normalized = _normalize_model_sql_text(text)
     if not normalized:
-        raise SQLGenerationError("Empty response from LLM")
+        raise _generation_error("EMPTY_RESPONSE", "Empty response from LLM")
 
     return normalized

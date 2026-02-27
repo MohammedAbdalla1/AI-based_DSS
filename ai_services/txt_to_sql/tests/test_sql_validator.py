@@ -35,6 +35,12 @@ def assert_invalid(sql: str, match: str) -> None:
         validate_sql(sql, ROLE_SCHEMA)
 
 
+def assert_invalid_with_subcode(sql: str, match: str, subcode: str) -> None:
+    with pytest.raises(SQLValidationError, match=match) as exc:
+        validate_sql(sql, ROLE_SCHEMA)
+    assert exc.value.subcode == subcode
+
+
 def test_valid_simple_select_returns_normalized_sql():
     sql = "SELECT id, name FROM products"
     out = validate_sql(sql, ROLE_SCHEMA)
@@ -252,6 +258,22 @@ def test_reject_system_schema_table():
     assert_invalid(
         "SELECT COUNT(*) FROM pg_catalog.pg_class",
         "Access to system schema is not allowed",
+    )
+
+
+def test_reject_parse_error_subcode():
+    assert_invalid_with_subcode("SELEC FROM", "SQL parse error", "PARSE_ERROR")
+
+
+def test_reject_wildcard_select_subcode():
+    assert_invalid_with_subcode("SELECT * FROM products", r"Wildcard '\*' is not allowed", "WILDCARD_SELECT")
+
+
+def test_reject_system_schema_subcode():
+    assert_invalid_with_subcode(
+        "SELECT COUNT(*) FROM pg_catalog.pg_class",
+        "Access to system schema is not allowed",
+        "SYSTEM_SCHEMA_ACCESS",
     )
 
 

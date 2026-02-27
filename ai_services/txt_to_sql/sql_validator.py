@@ -24,6 +24,14 @@ from sqlglot.optimizer.qualify import qualify
 class SQLValidationError(Exception):
     """Raised when SQL fails validation rules."""
 
+    def __init__(self, message: str, subcode: str = "UNKNOWN"):
+        super().__init__(message)
+        self.subcode = subcode
+
+
+def _validation_error(subcode: str, message: str) -> SQLValidationError:
+    return SQLValidationError(message=message, subcode=subcode)
+
 
 # =========================================================
 # Dialect-Specific Allowed Functions
@@ -86,7 +94,7 @@ def validate_sql(
     """
 
     if not sql or not sql.strip():
-        raise SQLValidationError("SQL is empty")
+        raise _validation_error("EMPTY_SQL", "SQL is empty")
 
     raw = sql.strip()
 
@@ -97,10 +105,10 @@ def validate_sql(
     try:
         statements = parse(raw, read=sqlglot_dialect)
     except ParseError as exc:
-        raise SQLValidationError(f"SQL parse error: {exc}")
+        raise _validation_error("PARSE_ERROR", f"SQL parse error: {exc}")
 
     if len(statements) != 1:
-        raise SQLValidationError("Multiple SQL statements are not allowed")
+        raise _validation_error("MULTI_STATEMENT", "Multiple SQL statements are not allowed")
 
     statement = statements[0]
 
@@ -115,7 +123,7 @@ def validate_sql(
             validate_qualify_columns=True,
         )
     except Exception as exc:
-        raise SQLValidationError(f"Schema resolution error: {exc}")
+        raise _validation_error("SCHEMA_RESOLUTION_ERROR", f"Schema resolution error: {exc}")
 
     _validate_statement(qualified, role_schema, dialect)
 
@@ -129,22 +137,22 @@ def validate_sql(
 
 def _reject_markdown_or_comments(sql: str) -> None:
     if "```" in sql or "`" in sql:
-        raise SQLValidationError("Markdown or code formatting is not allowed in SQL")
+        raise _validation_error("MARKDOWN_OR_COMMENTS", "Markdown or code formatting is not allowed in SQL")
     if "--" in sql or "/*" in sql or "*/" in sql:
-        raise SQLValidationError("SQL comments are not allowed")
+        raise _validation_error("MARKDOWN_OR_COMMENTS", "SQL comments are not allowed")
 
 
 def _require_select_only(statement: exp.Expression) -> None:
     if not isinstance(statement, exp.Select):
-        raise SQLValidationError("Only SELECT queries are allowed")
+        raise _validation_error("NON_SELECT_QUERY", "Only SELECT queries are allowed")
 
     if statement.find(exp.Insert) or statement.find(exp.Update) or statement.find(exp.Delete):
-        raise SQLValidationError("Only SELECT queries are allowed")
+        raise _validation_error("NON_SELECT_QUERY", "Only SELECT queries are allowed")
 
 
 def _reject_select_into(statement: exp.Expression) -> None:
     if statement.find(exp.Into):
-        raise SQLValidationError("SELECT INTO is not allowed")
+        raise _validation_error("SELECT_INTO", "SELECT INTO is not allowed")
 
 
 def _reject_wildcards(statement: exp.Expression) -> None:
@@ -152,7 +160,8 @@ def _reject_wildcards(statement: exp.Expression) -> None:
         # Allow COUNT(*)
         if isinstance(star.parent, exp.Count):
             continue
-        raise SQLValidationError(
+        raise _validation_error(
+            "WILDCARD_SELECT",
             "Wildcard '*' is not allowed; select explicit columns"
         )
 
@@ -176,14 +185,14 @@ def _validate_statement(
     _validate_ctes(statement)
 
     if statement.find(exp.Union):
-        raise SQLValidationError("UNION and UNION ALL are not supported")
+        raise _validation_error("UNION_NOT_SUPPORTED", "UNION and UNION ALL are not supported")
 
     _require_select_only(statement)
     _reject_select_into(statement)
     _reject_wildcards(statement)
 
     if _select_has_no_from(statement):
-        raise SQLValidationError("SELECT without FROM is not allowed")
+        raise _validation_error("SELECT_WITHOUT_FROM", "SELECT without FROM is not allowed")
 
     _validate_functions(statement, dialect)
     _validate_schema_access(statement, role_schema)
@@ -199,7 +208,7 @@ def _validate_ctes(statement: exp.Expression) -> None:
         return
 
     if with_clause.args.get("recursive"):
-        raise SQLValidationError("Recursive CTEs (WITH RECURSIVE) are not supported")
+        raise _validation_error("RECURSIVE_CTE", "Recursive CTEs (WITH RECURSIVE) are not supported")
 
 
 def _to_sqlglot_dialect(dialect: str) -> str:
@@ -222,14 +231,16 @@ def _validate_functions(statement: exp.Expression, dialect: str) -> None:
     # Block schema-qualified functions (e.g., pg_catalog.now())
     for prop in statement.find_all(exp.Property):
         if isinstance(prop.this, exp.Func):
-            raise SQLValidationError(
+            raise _validation_error(
+                "SCHEMA_QUALIFIED_FUNCTION",
                 f"Schema-qualified functions are not allowed: '{prop.sql()}'"
             )
 
     # Handle parser outputs like pg_catalog.now() represented as Dot(..., Func)
     for dot in statement.find_all(exp.Dot):
         if isinstance(dot.expression, exp.Func):
-            raise SQLValidationError(
+            raise _validation_error(
+                "SCHEMA_QUALIFIED_FUNCTION",
                 f"Schema-qualified functions are not allowed: '{dot.sql()}'"
             )
 
@@ -253,16 +264,16 @@ def _validate_functions(statement: exp.Expression, dialect: str) -> None:
         }
 
         if not candidates:
-            raise SQLValidationError("Unknown SQL function detected")
+            raise _validation_error("UNKNOWN_FUNCTION", "Unknown SQL function detected")
 
         for name in candidates:
             if "." in name:
-                raise SQLValidationError("Schema-qualified functions are not allowed")
+                raise _validation_error("SCHEMA_QUALIFIED_FUNCTION", "Schema-qualified functions are not allowed")
 
         if not any(name in allowed for name in candidates):
             # Prefer canonical sqlglot name in the error for consistency.
             rejected = (canonical_name or raw_name or "unknown").lower()
-            raise SQLValidationError(f"Function not allowed: '{rejected}'")
+            raise _validation_error("FUNCTION_NOT_ALLOWED", f"Function not allowed: '{rejected}'")
 
 
 # =========================================================
@@ -293,10 +304,11 @@ def _validate_schema_access(
         name = table.name
 
         if not name:
-            raise SQLValidationError("Table name is missing")
+            raise _validation_error("TABLE_NAME_MISSING", "Table name is missing")
 
         if table.db and table.db.lower() in {"pg_catalog", "information_schema"}:
-            raise SQLValidationError(
+            raise _validation_error(
+                "SYSTEM_SCHEMA_ACCESS",
                 f"Access to system schema is not allowed: '{table.db}'"
             )
 
@@ -307,7 +319,8 @@ def _validate_schema_access(
             continue
 
         if name not in allowed_tables:
-            raise SQLValidationError(
+            raise _validation_error(
+                "TABLE_NOT_ALLOWED",
                 f"Table not allowed for this role: '{name}'"
             )
 
@@ -330,7 +343,8 @@ def _validate_schema_access(
             # SELECT aliases are valid in ORDER BY / GROUP BY clauses.
             if column.name in select_aliases:
                 continue
-            raise SQLValidationError(
+            raise _validation_error(
+                "UNRESOLVED_COLUMN",
                 f"Unresolved column detected: '{column.name}'"
             )
 
@@ -340,11 +354,13 @@ def _validate_schema_access(
             continue
 
         if resolved_table not in role_schema:
-            raise SQLValidationError(
+            raise _validation_error(
+                "UNAUTHORIZED_TABLE_ACCESS",
                 f"Unauthorized table access: '{table}'"
             )
 
         if column.name not in role_schema[resolved_table]:
-            raise SQLValidationError(
+            raise _validation_error(
+                "UNAUTHORIZED_COLUMN_ACCESS",
                 f"Unauthorized access to {resolved_table}.{column.name}"
             )

@@ -15,8 +15,9 @@ def reset_client_cache():
 def test_get_client_requires_api_key(monkeypatch):
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
 
-    with pytest.raises(sg.SQLGenerationError, match="GEMINI_API_KEY is missing"):
+    with pytest.raises(sg.SQLGenerationError, match="GEMINI_API_KEY is missing") as exc:
         sg._get_client()
+    assert exc.value.subcode == "MISSING_API_KEY"
 
 
 def test_get_client_caches_client(monkeypatch):
@@ -54,8 +55,9 @@ def test_get_client_wraps_client_init_exception(monkeypatch):
 
 @pytest.mark.parametrize("prompt", ["", "   ", None, 123])
 def test_generate_sql_rejects_empty_prompt(prompt):
-    with pytest.raises(sg.SQLGenerationError, match="Prompt is empty"):
+    with pytest.raises(sg.SQLGenerationError, match="Prompt is empty") as exc:
         sg.generate_sql(prompt)
+    assert exc.value.subcode == "PROMPT_EMPTY"
 
 
 def test_generate_sql_success(monkeypatch):
@@ -95,8 +97,9 @@ def test_generate_sql_wraps_client_exception(monkeypatch):
     monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
     monkeypatch.setattr(sg.genai, "Client", FakeClient)
 
-    with pytest.raises(sg.SQLGenerationError, match="Gemini generation failed: RuntimeError"):
+    with pytest.raises(sg.SQLGenerationError, match="Gemini generation failed: RuntimeError") as exc:
         sg.generate_sql("list all users")
+    assert exc.value.subcode == "PROVIDER_FAILURE"
 
 
 @pytest.mark.parametrize(
@@ -115,8 +118,9 @@ def test_generate_sql_rejects_empty_response(monkeypatch, model_text):
     monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
     monkeypatch.setattr(sg.genai, "Client", FakeClient)
 
-    with pytest.raises(sg.SQLGenerationError, match="Empty response from LLM"):
+    with pytest.raises(sg.SQLGenerationError, match="Empty response from LLM") as exc:
         sg.generate_sql("list all users")
+    assert exc.value.subcode == "EMPTY_RESPONSE"
 
 
 @pytest.mark.parametrize(
@@ -135,5 +139,6 @@ def test_generate_sql_rejects_invalid_response_text_type(monkeypatch, response_p
     monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
     monkeypatch.setattr(sg.genai, "Client", FakeClient)
 
-    with pytest.raises(sg.SQLGenerationError, match="Invalid response type from LLM"):
+    with pytest.raises(sg.SQLGenerationError, match="Invalid response type from LLM") as exc:
         sg.generate_sql("list all users")
+    assert exc.value.subcode == "INVALID_RESPONSE_TYPE"
