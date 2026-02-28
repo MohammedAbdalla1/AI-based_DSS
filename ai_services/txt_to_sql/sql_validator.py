@@ -70,6 +70,49 @@ ALLOWED_FUNCTIONS = {
 
 
 # =========================================================
+# Identifier Normalization
+# =========================================================
+
+def _normalize_role_schema(
+    role_schema: Dict[str, Dict[str, str]],
+) -> Dict[str, Dict[str, str]]:
+    """
+    Normalize table/column identifiers from the API role schema to lowercase.
+
+    This aligns matching with dialect behavior where unquoted identifiers are
+    case-insensitive (e.g., Postgres folds to lowercase).
+    """
+
+    normalized_schema: Dict[str, Dict[str, str]] = {}
+
+    for table_name, columns in role_schema.items():
+        normalized_table = table_name.lower()
+
+        if normalized_table in normalized_schema and table_name != normalized_table:
+            raise _validation_error(
+                "SCHEMA_RESOLUTION_ERROR",
+                f"Schema normalization conflict on table: '{table_name}'",
+            )
+
+        normalized_columns: Dict[str, str] = {}
+        for column_name, column_type in columns.items():
+            normalized_column = column_name.lower()
+            if normalized_column in normalized_columns and column_name != normalized_column:
+                raise _validation_error(
+                    "SCHEMA_RESOLUTION_ERROR",
+                    (
+                        "Schema normalization conflict on column "
+                        f"'{column_name}' in table '{table_name}'"
+                    ),
+                )
+            normalized_columns[normalized_column] = column_type
+
+        normalized_schema[normalized_table] = normalized_columns
+
+    return normalized_schema
+
+
+# =========================================================
 # Main Validation Entry
 # =========================================================
 
@@ -97,6 +140,7 @@ def validate_sql(
         raise _validation_error("EMPTY_SQL", "SQL is empty")
 
     raw = sql.strip()
+    normalized_role_schema = _normalize_role_schema(role_schema)
 
     _reject_markdown_or_comments(raw)
 
@@ -119,13 +163,13 @@ def validate_sql(
     try:
         qualified = qualify(
             statement,
-            schema=role_schema,
+            schema=normalized_role_schema,
             validate_qualify_columns=True,
         )
     except Exception as exc:
         raise _validation_error("SCHEMA_RESOLUTION_ERROR", f"Schema resolution error: {exc}")
 
-    _validate_statement(qualified, role_schema, dialect)
+    _validate_statement(qualified, normalized_role_schema, dialect)
 
     # Return normalized SQL
     return qualified.sql(dialect=sqlglot_dialect)

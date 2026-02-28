@@ -101,8 +101,7 @@ Retry policy: no retry.
 
 ## OpenAPI Spec
 
-- OpenAPI file: `openapi.yaml`
-- Swagger UI page: `swagger-ui.html`
+- OpenAPI source of truth: FastAPI runtime schema
 - Paths defined:
   - `GET /health`
   - `POST /txt-to-sql`
@@ -113,19 +112,7 @@ Retry policy: no retry.
   - `TextToSQLError`
   - `TextToSQLResponse`
 
-You can load this file into Swagger Editor / Swagger UI for interactive contract review.
-
-### Local Swagger UI
-
-Run from the `txt_to_sql` directory:
-
-```powershell
-python -m http.server 8080
-```
-
-Open in browser:
-
-- `http://localhost:8080/swagger-ui.html`
+Use FastAPI docs for interactive contract review.
 
 ### Run API Endpoint
 
@@ -139,6 +126,8 @@ Then call:
 
 - `GET http://127.0.0.1:8000/health`
 - `POST http://127.0.0.1:8000/txt-to-sql`
+- `Swagger UI: http://127.0.0.1:8000/docs`
+- `OpenAPI JSON: http://127.0.0.1:8000/openapi.json`
 
 ### HTTP Status Mapping
 

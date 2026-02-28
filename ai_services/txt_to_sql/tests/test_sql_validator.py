@@ -50,6 +50,44 @@ def test_valid_simple_select_returns_normalized_sql():
     assert "FROM" in out.upper()
 
 
+def test_valid_uppercase_role_schema_with_lowercase_sql():
+    uppercase_schema = {
+        "PRODUCTS": {
+            "ID": "INT",
+            "NAME": "TEXT",
+            "PRICE": "DECIMAL",
+            "CATEGORY_ID": "INT",
+            "BRAND_ID": "INT",
+        },
+    }
+    out = validate_sql("SELECT id, name FROM products", uppercase_schema)
+    out_upper_sql = validate_sql("SELECT ID, NAME FROM PRODUCTS", uppercase_schema)
+
+    assert "SELECT" in out.upper()
+    assert "FROM" in out.upper()
+    assert "SELECT" in out_upper_sql.upper()
+    assert "FROM" in out_upper_sql.upper()
+
+
+def test_reject_role_schema_normalization_conflict():
+    conflicting_schema = {
+        "products": {"id": "INT"},
+        "PRODUCTS": {"ID": "INT"},
+    }
+
+    with pytest.raises(SQLValidationError, match="Schema normalization conflict on table"):
+        validate_sql("SELECT id FROM products", conflicting_schema)
+
+
+def test_reject_role_schema_column_normalization_conflict():
+    conflicting_schema = {
+        "products": {"id": "INT", "ID": "INT"},
+    }
+
+    with pytest.raises(SQLValidationError, match="Schema normalization conflict on column"):
+        validate_sql("SELECT id FROM products", conflicting_schema)
+
+
 def test_valid_count_star():
     sql = "SELECT COUNT(*) FROM products"
     out = validate_sql(sql, ROLE_SCHEMA)
