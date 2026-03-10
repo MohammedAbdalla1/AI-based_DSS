@@ -1,6 +1,7 @@
 from fastapi.testclient import TestClient
 
-from txt_to_sql import api
+import main
+from txt_to_sql import router
 from txt_to_sql.models import TextToSQLError, TextToSQLSuccess
 
 
@@ -16,12 +17,12 @@ VALID_PAYLOAD = {
 }
 
 
-client = TestClient(api.app)
+client = TestClient(main.app)
 
 
 def test_txt_to_sql_endpoint_success(monkeypatch):
     monkeypatch.setattr(
-        api,
+        router,
         "run_txt_to_sql",
         lambda request: TextToSQLSuccess(
             status="success",
@@ -39,7 +40,7 @@ def test_txt_to_sql_endpoint_success(monkeypatch):
 
 def test_txt_to_sql_endpoint_maps_invalid_request_to_400(monkeypatch):
     monkeypatch.setattr(
-        api,
+        router,
         "run_txt_to_sql",
         lambda request: TextToSQLError(
             status="error",
@@ -58,7 +59,7 @@ def test_txt_to_sql_endpoint_maps_invalid_request_to_400(monkeypatch):
 
 def test_txt_to_sql_endpoint_maps_sql_rejected_to_422(monkeypatch):
     monkeypatch.setattr(
-        api,
+        router,
         "run_txt_to_sql",
         lambda request: TextToSQLError(
             status="error",
@@ -77,7 +78,7 @@ def test_txt_to_sql_endpoint_maps_sql_rejected_to_422(monkeypatch):
 
 def test_txt_to_sql_endpoint_maps_generation_failed_to_502(monkeypatch):
     monkeypatch.setattr(
-        api,
+        router,
         "run_txt_to_sql",
         lambda request: TextToSQLError(
             status="error",
@@ -96,7 +97,7 @@ def test_txt_to_sql_endpoint_maps_generation_failed_to_502(monkeypatch):
 
 def test_txt_to_sql_endpoint_maps_internal_error_to_500(monkeypatch):
     monkeypatch.setattr(
-        api,
+        router,
         "run_txt_to_sql",
         lambda request: TextToSQLError(
             status="error",

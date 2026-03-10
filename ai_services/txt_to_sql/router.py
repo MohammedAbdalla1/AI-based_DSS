@@ -1,12 +1,12 @@
 """
-FastAPI endpoint layer for Text-to-SQL.
+FastAPI router layer for Text-to-SQL.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 
-from fastapi import FastAPI, Request
+from fastapi import APIRouter
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from dotenv import load_dotenv
@@ -30,13 +30,10 @@ def _status_for_error(error: TextToSQLError) -> int:
     return ERROR_STATUS_MAP.get(error.error_code, 500)
 
 
-app = FastAPI(
-    title="Text-to-SQL Service API",
-    version="1.0.0",
-)
+router = APIRouter(prefix="/txt-to-sql", tags=["txt_to_sql"])
 
 
-def _request_validation_message(exc: RequestValidationError) -> str:
+def request_validation_message(exc: RequestValidationError) -> str:
     errors = exc.errors()
     if not errors:
         return "Invalid request payload."
@@ -50,19 +47,18 @@ def _request_validation_message(exc: RequestValidationError) -> str:
     return str(msg)
 
 
-@app.exception_handler(RequestValidationError)
-def handle_request_validation_error(request: Request, exc: RequestValidationError):
+def request_validation_error_response(exc: RequestValidationError) -> JSONResponse:
     error = TextToSQLError(
         status="error",
         error_code="INVALID_REQUEST",
         error_subcode="PAYLOAD_VALIDATION",
-        message=_request_validation_message(exc),
+        message=request_validation_message(exc),
     )
     return JSONResponse(status_code=400, content=error.model_dump())
 
 
-@app.post(
-    "/txt-to-sql",
+@router.post(
+    "",
     response_model=TextToSQLResponse,
     responses={
         400: {"model": TextToSQLError, "description": "Invalid request payload"},
@@ -76,8 +72,3 @@ def txt_to_sql(request: TextToSQLRequest):
     if result.status == "error":
         return JSONResponse(status_code=_status_for_error(result), content=result.model_dump())
     return result
-
-
-@app.get("/health")
-def health():
-    return {"status": "ok"}

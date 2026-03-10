@@ -105,6 +105,7 @@ Retry policy: no retry.
 - Paths defined:
   - `GET /health`
   - `POST /txt-to-sql`
+  - `POST /rag/ask` (placeholder until RAG pipeline is implemented)
 - Main schemas:
   - `HealthResponse`
   - `TextToSQLRequest`
@@ -116,16 +117,17 @@ Use FastAPI docs for interactive contract review.
 
 ### Run API Endpoint
 
-Run the FastAPI app from the `AI-based_DSS/ai_services` directory:
+Run the shared FastAPI app from the `AI-based_DSS/ai_services` directory:
 
 ```powershell
-uvicorn txt_to_sql.api:app --host 127.0.0.1 --port 8000 --reload
+uvicorn main:app --host 127.0.0.1 --port 8000 --reload
 ```
 
 Then call:
 
 - `GET http://127.0.0.1:8000/health`
 - `POST http://127.0.0.1:8000/txt-to-sql`
+- `POST http://127.0.0.1:8000/rag/ask` (placeholder until RAG pipeline is implemented)
 - `Swagger UI: http://127.0.0.1:8000/docs`
 - `OpenAPI JSON: http://127.0.0.1:8000/openapi.json`
 
@@ -160,6 +162,6 @@ Response handling:
 
 ## Environment Variables
 
-- The API loads `.env` from the `txt_to_sql` directory during startup (`api.py`).
+- The API loads `.env` from the `txt_to_sql` directory during startup (`router.py`).
 - `GEMINI_API_KEY` can be provided in that `.env` file for local/dev runs.
 - Existing process environment values are not overridden (`override=False`).
