@@ -30,6 +30,14 @@ ROLE_SCHEMA = {
 }
 
 
+QUALIFIED_ROLE_SCHEMA = {
+    "dbo.employee": {
+        "id": "INT",
+        "name": "TEXT",
+    }
+}
+
+
 def assert_invalid(sql: str, match: str) -> None:
     with pytest.raises(SQLValidationError, match=match):
         validate_sql(sql, ROLE_SCHEMA)
@@ -67,6 +75,37 @@ def test_valid_uppercase_role_schema_with_lowercase_sql():
     assert "FROM" in out.upper()
     assert "SELECT" in out_upper_sql.upper()
     assert "FROM" in out_upper_sql.upper()
+
+
+@pytest.mark.parametrize(
+    "dialect, table_key, sql",
+    [
+        ("postgres", "public.products", "SELECT public.products.id FROM public.products"),
+        ("sqlserver", "dbo.employee", "SELECT dbo.employee.id FROM dbo.employee"),
+        ("mysql", "mydatabase.employee", "SELECT mydatabase.employee.id FROM mydatabase.employee"),
+    ],
+)
+def test_valid_schema_qualified_table_identifiers(dialect: str, table_key: str, sql: str):
+    qualified_schema = {
+        table_key: {
+            "id": "INT",
+        }
+    }
+
+    out = validate_sql(sql, qualified_schema, dialect=dialect)
+
+    assert "SELECT" in out.upper()
+    assert "FROM" in out.upper()
+
+
+def test_valid_unqualified_query_with_single_qualified_role_table():
+    out = validate_sql(
+        "SELECT id FROM employee",
+        QUALIFIED_ROLE_SCHEMA,
+        dialect="sqlserver",
+    )
+    assert "SELECT" in out.upper()
+    assert "FROM" in out.upper()
 
 
 def test_reject_role_schema_normalization_conflict():
@@ -290,6 +329,29 @@ def test_reject_unknown_table_inside_cte_as_schema_resolution_error():
 
 def test_reject_unknown_column_as_schema_resolution_error():
     assert_invalid("SELECT products.sku FROM products", "Schema resolution error")
+
+
+def test_reject_schema_qualified_table_not_in_role_schema():
+    with pytest.raises(SQLValidationError, match="Table not allowed for this role") as exc:
+        validate_sql(
+            "SELECT COUNT(*) FROM hr.employee",
+            QUALIFIED_ROLE_SCHEMA,
+            dialect="sqlserver",
+        )
+
+    assert exc.value.subcode == "TABLE_NOT_ALLOWED"
+
+
+def test_reject_ambiguous_unqualified_reference_for_multi_schema_same_table():
+    ambiguous_schema = {
+        "dbo.employee": {"id": "INT"},
+        "hr.employee": {"id": "INT"},
+    }
+
+    with pytest.raises(SQLValidationError, match="Schema resolution error") as exc:
+        validate_sql("SELECT id FROM employee", ambiguous_schema, dialect="sqlserver")
+
+    assert exc.value.subcode == "SCHEMA_RESOLUTION_ERROR"
 
 
 def test_reject_system_schema_table():

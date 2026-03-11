@@ -14,7 +14,8 @@ SaaS-ready:
 
 from __future__ import annotations
 
-from typing import Dict, Set
+from dataclasses import dataclass
+from typing import Any, Dict, Set, Tuple
 
 from sqlglot import exp, parse
 from sqlglot.errors import ParseError
@@ -31,6 +32,17 @@ class SQLValidationError(Exception):
 
 def _validation_error(subcode: str, message: str) -> SQLValidationError:
     return SQLValidationError(message=message, subcode=subcode)
+
+
+BLOCKED_SYSTEM_SCHEMAS = {"pg_catalog", "information_schema"}
+
+
+@dataclass(frozen=True)
+class NormalizedRoleSchema:
+    access_schema: Dict[str, Dict[str, str]]
+    qualify_schema: Dict[str, Any]
+    table_path_to_key: Dict[Tuple[str, ...], str]
+    unqualified_to_key: Dict[str, str]
 
 
 # =========================================================
@@ -75,7 +87,7 @@ ALLOWED_FUNCTIONS = {
 
 def _normalize_role_schema(
     role_schema: Dict[str, Dict[str, str]],
-) -> Dict[str, Dict[str, str]]:
+) -> NormalizedRoleSchema:
     """
     Normalize table/column identifiers from the API role schema to lowercase.
 
@@ -83,12 +95,16 @@ def _normalize_role_schema(
     case-insensitive (e.g., Postgres folds to lowercase).
     """
 
-    normalized_schema: Dict[str, Dict[str, str]] = {}
+    access_schema: Dict[str, Dict[str, str]] = {}
+    qualify_schema: Dict[str, Any] = {}
+    table_path_to_key: Dict[Tuple[str, ...], str] = {}
+    table_name_to_keys: Dict[str, Set[str]] = {}
 
     for table_name, columns in role_schema.items():
-        normalized_table = table_name.lower()
+        normalized_parts = _normalize_table_identifier_parts(table_name)
+        normalized_table = ".".join(normalized_parts)
 
-        if normalized_table in normalized_schema and table_name != normalized_table:
+        if normalized_table in access_schema and table_name != normalized_table:
             raise _validation_error(
                 "SCHEMA_RESOLUTION_ERROR",
                 f"Schema normalization conflict on table: '{table_name}'",
@@ -107,9 +123,110 @@ def _normalize_role_schema(
                 )
             normalized_columns[normalized_column] = column_type
 
-        normalized_schema[normalized_table] = normalized_columns
+        access_schema[normalized_table] = normalized_columns
+        table_path_to_key[normalized_parts] = normalized_table
+        table_name_to_keys.setdefault(normalized_parts[-1], set()).add(normalized_table)
 
-    return normalized_schema
+        _insert_qualify_schema_entry(
+            qualify_schema=qualify_schema,
+            table_parts=normalized_parts,
+            columns=normalized_columns,
+            source_table_name=table_name,
+        )
+
+    unqualified_to_key: Dict[str, str] = {}
+    for table_name, candidates in table_name_to_keys.items():
+        if len(candidates) == 1:
+            unqualified_to_key[table_name] = next(iter(candidates))
+
+    return NormalizedRoleSchema(
+        access_schema=access_schema,
+        qualify_schema=qualify_schema,
+        table_path_to_key=table_path_to_key,
+        unqualified_to_key=unqualified_to_key,
+    )
+
+
+def _normalize_table_identifier_parts(table_name: str) -> Tuple[str, ...]:
+    parts = [part.strip().lower() for part in table_name.split(".")]
+    if not parts or any(not part for part in parts):
+        raise _validation_error(
+            "SCHEMA_RESOLUTION_ERROR",
+            f"Invalid table identifier in role_schema: '{table_name}'",
+        )
+    if len(parts) > 3:
+        raise _validation_error(
+            "SCHEMA_RESOLUTION_ERROR",
+            f"Unsupported table identifier depth in role_schema: '{table_name}'",
+        )
+    return tuple(parts)
+
+
+def _is_column_mapping(value: Any) -> bool:
+    return isinstance(value, dict) and all(isinstance(v, str) for v in value.values())
+
+
+def _insert_qualify_schema_entry(
+    qualify_schema: Dict[str, Any],
+    table_parts: Tuple[str, ...],
+    columns: Dict[str, str],
+    source_table_name: str,
+) -> None:
+    node: Dict[str, Any] = qualify_schema
+
+    for index, part in enumerate(table_parts):
+        is_leaf = index == len(table_parts) - 1
+        existing = node.get(part)
+
+        if is_leaf:
+            if existing is None:
+                node[part] = dict(columns)
+                return
+
+            if _is_column_mapping(existing):
+                if existing != columns:
+                    raise _validation_error(
+                        "SCHEMA_RESOLUTION_ERROR",
+                        f"Schema normalization conflict on table: '{source_table_name}'",
+                    )
+                return
+
+            raise _validation_error(
+                "SCHEMA_RESOLUTION_ERROR",
+                f"Schema normalization conflict on table: '{source_table_name}'",
+            )
+
+        if existing is None:
+            node[part] = {}
+            node = node[part]
+            continue
+
+        if _is_column_mapping(existing):
+            raise _validation_error(
+                "SCHEMA_RESOLUTION_ERROR",
+                f"Schema normalization conflict on table: '{source_table_name}'",
+            )
+
+        node = existing
+
+
+def _statement_uses_unqualified_tables(statement: exp.Expression) -> bool:
+    found_table = False
+    for table in statement.find_all(exp.Table):
+        if table.name:
+            found_table = True
+        if table.db or getattr(table, "catalog", None):
+            return False
+    return found_table
+
+
+def _build_unqualified_qualify_schema(
+    schema_info: NormalizedRoleSchema,
+) -> Dict[str, Dict[str, str]]:
+    fallback: Dict[str, Dict[str, str]] = {}
+    for table_name, resolved_key in schema_info.unqualified_to_key.items():
+        fallback[table_name] = schema_info.access_schema[resolved_key]
+    return fallback
 
 
 # =========================================================
@@ -162,12 +279,29 @@ def validate_sql(
     # STRICT qualification (fail on unresolved or ambiguous columns)
     try:
         qualified = qualify(
-            statement,
-            schema=normalized_role_schema,
+            statement.copy(),
+            schema=normalized_role_schema.qualify_schema,
             validate_qualify_columns=True,
         )
     except Exception as exc:
-        raise _validation_error("SCHEMA_RESOLUTION_ERROR", f"Schema resolution error: {exc}")
+        should_try_unqualified = _statement_uses_unqualified_tables(statement)
+        fallback_schema = (
+            _build_unqualified_qualify_schema(normalized_role_schema)
+            if should_try_unqualified
+            else {}
+        )
+
+        if fallback_schema:
+            try:
+                qualified = qualify(
+                    statement.copy(),
+                    schema=fallback_schema,
+                    validate_qualify_columns=True,
+                )
+            except Exception:
+                raise _validation_error("SCHEMA_RESOLUTION_ERROR", f"Schema resolution error: {exc}")
+        else:
+            raise _validation_error("SCHEMA_RESOLUTION_ERROR", f"Schema resolution error: {exc}")
 
     _validate_statement(qualified, normalized_role_schema, dialect)
 
@@ -223,7 +357,7 @@ def _select_has_no_from(statement: exp.Expression) -> bool:
 
 def _validate_statement(
     statement: exp.Expression,
-    role_schema: Dict[str, Dict[str, str]],
+    role_schema: Dict[str, Dict[str, str]] | NormalizedRoleSchema,
     dialect: str,
 ) -> None:
     _validate_ctes(statement)
@@ -326,10 +460,11 @@ def _validate_functions(statement: exp.Expression, dialect: str) -> None:
 
 def _validate_schema_access(
     statement: exp.Expression,
-    role_schema: Dict[str, Dict[str, str]],
+    role_schema: Dict[str, Dict[str, str]] | NormalizedRoleSchema,
 ) -> None:
+    schema_info = _ensure_normalized_role_schema(role_schema)
+    normalized_schema = schema_info.access_schema
 
-    allowed_tables: Set[str] = set(role_schema.keys())
     alias_to_table: Dict[str, str] = {}
     cte_names: Set[str] = set()
     derived_aliases: Set[str] = set()
@@ -338,44 +473,51 @@ def _validate_schema_access(
     if isinstance(statement, exp.Select):
         for expression in statement.expressions:
             if isinstance(expression, exp.Alias) and expression.alias:
-                select_aliases.add(expression.alias)
+                select_aliases.add(expression.alias.lower())
 
     for cte in statement.find_all(exp.CTE):
         if cte.alias:
-            cte_names.add(cte.alias)
+            cte_names.add(cte.alias.lower())
 
     for table in statement.find_all(exp.Table):
-        name = table.name
-
-        if not name:
+        table_parts = _table_identifier_parts(table)
+        if not table_parts:
             raise _validation_error("TABLE_NAME_MISSING", "Table name is missing")
 
-        if table.db and table.db.lower() in {"pg_catalog", "information_schema"}:
+        name = table_parts[-1]
+        schema_part = table_parts[-2] if len(table_parts) >= 2 else None
+
+        if schema_part and schema_part in BLOCKED_SYSTEM_SCHEMAS:
             raise _validation_error(
                 "SYSTEM_SCHEMA_ACCESS",
-                f"Access to system schema is not allowed: '{table.db}'"
+                f"Access to system schema is not allowed: '{schema_part}'"
             )
 
         if name in cte_names:
             alias = table.alias
             if alias:
-                alias_to_table[alias] = name
+                alias_to_table[alias.lower()] = name
             continue
 
-        if name not in allowed_tables:
+        resolved_table_key = _resolve_table_key(
+            table_parts=table_parts,
+            schema_info=schema_info,
+            allow_unqualified_fallback=True,
+        )
+        if not resolved_table_key:
             raise _validation_error(
                 "TABLE_NOT_ALLOWED",
-                f"Table not allowed for this role: '{name}'"
+                f"Table not allowed for this role: '{'.'.join(table_parts)}'"
             )
 
         alias = table.alias
         if alias:
-            alias_to_table[alias] = name
+            alias_to_table[alias.lower()] = resolved_table_key
 
     # Allow columns that come from derived-table aliases (subqueries in FROM/JOIN).
     for subquery in statement.find_all(exp.Subquery):
         if subquery.alias:
-            derived_aliases.add(subquery.alias)
+            derived_aliases.add(subquery.alias.lower())
 
     virtual_sources = cte_names | derived_aliases
 
@@ -385,26 +527,78 @@ def _validate_schema_access(
         # After qualify(), every column should have table
         if not table:
             # SELECT aliases are valid in ORDER BY / GROUP BY clauses.
-            if column.name in select_aliases:
+            if column.name and column.name.lower() in select_aliases:
                 continue
             raise _validation_error(
                 "UNRESOLVED_COLUMN",
                 f"Unresolved column detected: '{column.name}'"
             )
 
-        resolved_table = alias_to_table.get(table, table)
+        table_lookup_key = table.lower()
+        resolved_table = alias_to_table.get(table_lookup_key)
 
-        if resolved_table in virtual_sources:
+        if resolved_table and resolved_table in virtual_sources:
+            continue
+        if not resolved_table and table_lookup_key in virtual_sources:
             continue
 
-        if resolved_table not in role_schema:
+        if not resolved_table:
+            resolved_table = _resolve_table_key(
+                table_parts=(table_lookup_key,),
+                schema_info=schema_info,
+                allow_unqualified_fallback=True,
+            )
+
+        if not resolved_table:
             raise _validation_error(
                 "UNAUTHORIZED_TABLE_ACCESS",
                 f"Unauthorized table access: '{table}'"
             )
 
-        if column.name not in role_schema[resolved_table]:
+        column_name = (column.name or "").lower()
+        if column_name not in normalized_schema[resolved_table]:
             raise _validation_error(
                 "UNAUTHORIZED_COLUMN_ACCESS",
-                f"Unauthorized access to {resolved_table}.{column.name}"
+                f"Unauthorized access to {resolved_table}.{column_name}"
             )
+
+
+def _ensure_normalized_role_schema(
+    role_schema: Dict[str, Dict[str, str]] | NormalizedRoleSchema,
+) -> NormalizedRoleSchema:
+    if isinstance(role_schema, NormalizedRoleSchema):
+        return role_schema
+    return _normalize_role_schema(role_schema)
+
+
+def _resolve_table_key(
+    table_parts: Tuple[str, ...],
+    schema_info: NormalizedRoleSchema,
+    allow_unqualified_fallback: bool,
+) -> str | None:
+    direct_match = schema_info.table_path_to_key.get(table_parts)
+    if direct_match:
+        return direct_match
+
+    if allow_unqualified_fallback and len(table_parts) == 1:
+        return schema_info.unqualified_to_key.get(table_parts[0])
+
+    return None
+
+
+def _table_identifier_parts(table: exp.Table) -> Tuple[str, ...]:
+    name = table.name.lower() if table.name else ""
+    if not name:
+        return tuple()
+
+    db = table.db.lower() if table.db else ""
+    catalog_value = getattr(table, "catalog", None)
+    catalog = catalog_value.lower() if isinstance(catalog_value, str) else ""
+
+    parts = []
+    if catalog:
+        parts.append(catalog)
+    if db:
+        parts.append(db)
+    parts.append(name)
+    return tuple(parts)
