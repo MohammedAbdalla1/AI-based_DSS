@@ -15,7 +15,7 @@ from .models import TextToSQLError, TextToSQLRequest, TextToSQLResponse
 from .service import run_txt_to_sql
 
 
-load_dotenv(dotenv_path=Path(__file__).resolve().parent / ".env", override=False)
+load_dotenv(dotenv_path=Path(__file__).resolve().parents[2] / ".env", override=False)
 
 
 ERROR_STATUS_MAP = {
