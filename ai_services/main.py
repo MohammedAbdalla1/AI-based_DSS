@@ -7,11 +7,13 @@ from __future__ import annotations
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 
+from config import load_environment
+from rag.router import request_validation_error_response
 from rag.router import router as rag_router
-from txt_to_sql.router import (
-    request_validation_error_response,
-    router as txt_to_sql_router,
-)
+from txt_to_sql.router import router as txt_to_sql_router
+
+
+load_environment()
 
 
 app = FastAPI(

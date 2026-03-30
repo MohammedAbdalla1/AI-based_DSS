@@ -4,18 +4,17 @@ FastAPI router layer for Text-to-SQL.
 
 from __future__ import annotations
 
-from pathlib import Path
-
 from fastapi import APIRouter
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
-from dotenv import load_dotenv
+
+from config import load_environment
 
 from .models import TextToSQLError, TextToSQLRequest, TextToSQLResponse
 from .service import run_txt_to_sql
 
 
-load_dotenv(dotenv_path=Path(__file__).resolve().parent / ".env", override=False)
+load_environment()
 
 
 ERROR_STATUS_MAP = {
