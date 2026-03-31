@@ -1,4 +1,5 @@
 .env
+.data/
 venv/
 *.pyc
 .vscode/
