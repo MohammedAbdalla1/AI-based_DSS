@@ -1,0 +1,9 @@
+.env
+.data
+.pytest_cache
+__pycache__
+*.pyc
+venv
+txt_to_sql/.pytest_cache
+rag/tests/__pycache__
+txt_to_sql/tests/__pycache__

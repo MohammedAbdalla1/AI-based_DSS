@@ -115,6 +115,20 @@ Retry policy: no retry.
 
 Use FastAPI docs for interactive contract review.
 
+### Install Dependencies
+
+Install shared API runtime dependencies from the `AI-based_DSS/ai_services` directory:
+
+```powershell
+pip install -r requirements.txt
+```
+
+For local testing and development tools:
+
+```powershell
+pip install -r requirements-dev.txt
+```
+
 ### Run API Endpoint
 
 Run the shared FastAPI app from the `AI-based_DSS/ai_services` directory:
