@@ -24,7 +24,7 @@ from .models import (
     TextToSQLSuccess,
 )
 from .prompt_builder import build_sql_prompt
-from .sql_generator import SQLGenerationError, generate_sql
+from .sql_generator import GenerationResult, SQLGenerationError, generate_sql
 from .sql_validator import SQLValidationError, validate_sql
 
 
@@ -157,7 +157,7 @@ def _build_validation_retry_prompt(base_prompt: str, reason: str) -> str:
     )
 
 
-def _generate_sql_with_retry(prompt: str) -> tuple[Optional[str], Optional[TextToSQLError]]:
+def _generate_sql_with_retry(prompt: str) -> tuple[Optional[GenerationResult], Optional[TextToSQLError]]:
     attempt = 0
     prompt_to_use = prompt
 
@@ -172,9 +172,9 @@ def _generate_sql_with_retry(prompt: str) -> tuple[Optional[str], Optional[TextT
                 prompt_to_use = (
                     f"{prompt}\n\n"
                     "Output format reminder:\n"
-                    "- Return only SQL text.\n"
+                    "- Return a JSON object with \"sql\" and \"explanation\" fields.\n"
                     "- No markdown fences.\n"
-                    "- No comments.\n"
+                    "- No comments in SQL.\n"
                 )
                 continue
             return None, _error("GENERATION_FAILED", str(exc), error_subcode=subcode)
@@ -209,13 +209,14 @@ def run_txt_to_sql(request_or_payload: TextToSQLRequest | Mapping[str, Any]) -> 
             schema=request.role_schema,
             db_type=request.db_type,
         )
-        generated_sql, generation_error = _generate_sql_with_retry(prompt)
+        generation_result, generation_error = _generate_sql_with_retry(prompt)
         if generation_error:
             return generation_error
-        assert generated_sql is not None
+        assert generation_result is not None
 
+        explanation = generation_result.explanation
         validation_attempts_by_subcode: dict[str, int] = {}
-        sql_candidate = generated_sql
+        sql_candidate = generation_result.sql
         validation_prompt = prompt
         while True:
             try:
@@ -224,7 +225,7 @@ def run_txt_to_sql(request_or_payload: TextToSQLRequest | Mapping[str, Any]) -> 
                     role_schema=request.role_schema,
                     dialect=request.db_type,
                 )
-                return TextToSQLSuccess(status="success", sql=validated_sql)
+                return TextToSQLSuccess(status="success", sql=validated_sql, explanation=explanation)
             except SQLValidationError as exc:
                 subcode = _classify_validation_error(exc)
                 policy = VALIDATION_RETRY_MATRIX.get(subcode, RetryPolicy(max_attempts=1))
@@ -239,10 +240,13 @@ def run_txt_to_sql(request_or_payload: TextToSQLRequest | Mapping[str, Any]) -> 
 
                 if policy.regenerate and subcode_attempts < policy.max_attempts:
                     validation_prompt = _build_validation_retry_prompt(validation_prompt, str(exc))
-                    sql_candidate, generation_error = _generate_sql_with_retry(validation_prompt)
+                    retry_result, generation_error = _generate_sql_with_retry(validation_prompt)
                     if generation_error:
                         return generation_error
-                    assert sql_candidate is not None
+                    assert retry_result is not None
+                    sql_candidate = retry_result.sql
+                    if retry_result.explanation:
+                        explanation = retry_result.explanation
                     continue
 
                 return _error("SQL_REJECTED", str(exc), error_subcode=subcode)

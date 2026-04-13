@@ -102,6 +102,7 @@ class TextToSQLRequest(BaseModel):
 class TextToSQLSuccess(BaseModel):
     status: Literal["success"]
     sql: str
+    explanation: Optional[str] = None
 
 
 class TextToSQLError(BaseModel):
