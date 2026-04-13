@@ -76,6 +76,18 @@ def _parse_suggestions(raw_text: str) -> List[Dict[str, Any]]:
     return parsed
 
 
+def _coerce_generation_output_to_text(generation_output: Any) -> str:
+    """Normalize txt_to_sql generator output into plain text for analytics parsing."""
+    if isinstance(generation_output, str):
+        return generation_output
+
+    sql_text = getattr(generation_output, "sql", None)
+    if isinstance(sql_text, str):
+        return sql_text
+
+    return str(generation_output)
+
+
 def _validate_suggestion(
     suggestion_dict: Dict[str, Any],
     role_schema: Dict[str, Dict[str, str]],
@@ -163,9 +175,10 @@ def run_schema_to_analytics(
 
         # Call the LLM (reuse the same Gemini generator)
         raw_response = generate_sql(prompt)
+        response_text = _coerce_generation_output_to_text(raw_response)
 
         # Parse JSON suggestions from LLM response
-        suggestion_dicts = _parse_suggestions(raw_response)
+        suggestion_dicts = _parse_suggestions(response_text)
 
         if not suggestion_dicts:
             return _error(
@@ -201,4 +214,5 @@ def run_schema_to_analytics(
     except SQLGenerationError as exc:
         return _error("GENERATION_FAILED", str(exc))
     except Exception as exc:
+        logger.exception("Unexpected schema_to_analytics failure")
         return _error("INTERNAL_ERROR", f"Unexpected error: {type(exc).__name__}")
