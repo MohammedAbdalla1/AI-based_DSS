@@ -150,7 +150,13 @@ class RAGIngestSuccess(BaseModel):
     file_id: str
     file_name: str
     chunks_created: int
-    status: Literal["indexed"]
+    status: Literal["indexed", "already_indexed"]
+    already_exists: bool = False
+
+
+class RAGDeleteSuccess(BaseModel):
+    file_id: str
+    status: Literal["deleted"]
 
 
 class RAGError(BaseModel):
@@ -163,3 +169,4 @@ class RAGError(BaseModel):
 RAGAskResponse = Union[RAGAskSuccess, RAGError]
 RAGQueryResponse = Union[RAGQuerySuccess, RAGError]
 RAGIngestResponse = Union[RAGIngestSuccess, RAGError]
+RAGDeleteResponse = Union[RAGDeleteSuccess, RAGError]

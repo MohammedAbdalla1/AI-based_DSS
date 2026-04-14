@@ -22,6 +22,11 @@ def _connect() -> sqlite3.Connection:
     return connection
 
 
+def _column_exists(connection: sqlite3.Connection, table_name: str, column_name: str) -> bool:
+    rows = connection.execute(f"PRAGMA table_info({table_name})").fetchall()
+    return any(str(row["name"]) == column_name for row in rows)
+
+
 def ensure_schema() -> None:
     with _connect() as connection:
         connection.executescript(
@@ -55,11 +60,61 @@ def ensure_schema() -> None:
                 storage_path TEXT NOT NULL,
                 allowed_roles TEXT NOT NULL,
                 metadata TEXT NOT NULL DEFAULT '{}',
+                content_hash TEXT,
                 chunks_count INTEGER NOT NULL,
                 created_at TEXT NOT NULL
             );
             """
         )
+
+        # Backward-compatible migration for existing databases created before
+        # content_hash existed.
+        if not _column_exists(connection, "files", "content_hash"):
+            connection.execute("ALTER TABLE files ADD COLUMN content_hash TEXT")
+
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_files_tenant_content_hash ON files (tenant_id, content_hash)"
+        )
+
+
+def get_file_record(*, file_id: str, tenant_id: str | None = None) -> sqlite3.Row | None:
+    ensure_schema()
+    with _connect() as connection:
+        if tenant_id:
+            return connection.execute(
+                """
+                SELECT *
+                FROM files
+                WHERE id = ? AND tenant_id = ?
+                LIMIT 1
+                """,
+                (file_id, tenant_id),
+            ).fetchone()
+
+        return connection.execute(
+            """
+            SELECT *
+            FROM files
+            WHERE id = ?
+            LIMIT 1
+            """,
+            (file_id,),
+        ).fetchone()
+
+
+def get_file_by_content_hash(*, tenant_id: str, content_hash: str) -> sqlite3.Row | None:
+    ensure_schema()
+    with _connect() as connection:
+        return connection.execute(
+            """
+            SELECT *
+            FROM files
+            WHERE tenant_id = ? AND content_hash = ?
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            (tenant_id, content_hash),
+        ).fetchone()
 
 
 def upsert_document(
@@ -149,6 +204,7 @@ def insert_file_record(
     storage_path: str,
     allowed_roles: list[str],
     metadata: dict,
+    content_hash: str,
     chunks_count: int,
 ) -> None:
     ensure_schema()
@@ -163,9 +219,10 @@ def insert_file_record(
                 storage_path,
                 allowed_roles,
                 metadata,
+                content_hash,
                 chunks_count,
                 created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 file_id,
@@ -175,17 +232,22 @@ def insert_file_record(
                 storage_path,
                 dumps(allowed_roles),
                 dumps(metadata or {}),
+                content_hash,
                 chunks_count,
                 _utc_now(),
             ),
         )
 
 
-def delete_file_record(file_id: str) -> None:
+def delete_file_record(file_id: str, tenant_id: str | None = None) -> None:
     """Remove a file record from SQLite. Used for compensating rollback."""
     ensure_schema()
     with _connect() as connection:
-        connection.execute(
-            "DELETE FROM files WHERE id = ?",
-            (file_id,),
-        )
+        if tenant_id:
+            connection.execute(
+                "DELETE FROM files WHERE id = ? AND tenant_id = ?",
+                (file_id, tenant_id),
+            )
+            return
+
+        connection.execute("DELETE FROM files WHERE id = ?", (file_id,))

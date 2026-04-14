@@ -4,6 +4,8 @@ Orchestration layer for RAG ingestion and question-answering.
 
 from __future__ import annotations
 
+import hashlib
+from pathlib import Path
 from typing import Any, Mapping, Optional
 from uuid import uuid4
 
@@ -15,6 +17,8 @@ from . import access_control, database, generator, ingestion, rate_limit, retrie
 from .models import (
     RAGAskRequest,
     RAGAskResponse,
+    RAGDeleteResponse,
+    RAGDeleteSuccess,
     RAGAskSuccess,
     RAGError,
     RAGIngestMetadata,
@@ -210,6 +214,25 @@ async def run_rag_ingest(uploaded_file, metadata_or_payload: RAGIngestMetadata |
     storage_reference = None
     try:
         contents, file_name, ext, mime_type = await ingestion.read_and_validate_upload(uploaded_file)
+        text = ingestion.extract_text(contents, ext)
+
+        # Hash normalized extracted text (not raw bytes) so semantically identical
+        # content deduplicates even when binary file metadata differs.
+        content_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+        existing_file = database.get_file_by_content_hash(
+            tenant_id=metadata.tenant_id,
+            content_hash=content_hash,
+        )
+        if existing_file is not None:
+            return RAGIngestSuccess(
+                file_id=str(existing_file["id"]),
+                file_name=str(existing_file["file_name"]),
+                chunks_created=int(existing_file["chunks_count"]),
+                status="already_indexed",
+                already_exists=True,
+            )
+
         settings = get_settings()
         if settings.rag_persist_source_files:
             persisted_storage_path = ingestion.save_to_storage(
@@ -224,8 +247,8 @@ async def run_rag_ingest(uploaded_file, metadata_or_payload: RAGIngestMetadata |
             file_name=file_name,
             persisted_path=persisted_storage_path,
         )
-        text = ingestion.extract_text(contents, ext)
         chunks = ingestion.chunk_text(text)
+
         embeddings = generator.embed_texts(chunk.text for chunk in chunks)
         vector_records = [
             vector_store.TenantChunkVectorRecord(
@@ -252,6 +275,7 @@ async def run_rag_ingest(uploaded_file, metadata_or_payload: RAGIngestMetadata |
             storage_path=storage_reference,
             allowed_roles=metadata.allowed_roles,
             metadata=metadata.metadata,
+            content_hash=content_hash,
             chunks_count=len(chunks),
         )
         try:
@@ -282,6 +306,37 @@ async def run_rag_ingest(uploaded_file, metadata_or_payload: RAGIngestMetadata |
         return _error(
             "INTERNAL_ERROR",
             "Failed to index file.",
+            error_subcode="UNEXPECTED_EXCEPTION",
+        )
+
+
+def run_rag_delete_file(*, tenant_id: str, file_id: str) -> RAGDeleteResponse:
+    tenant_id = tenant_id.strip()
+    file_id = file_id.strip()
+
+    if not tenant_id:
+        return _error("INVALID_REQUEST", "tenant_id cannot be empty.", error_subcode="PAYLOAD_VALIDATION")
+    if not file_id:
+        return _error("INVALID_REQUEST", "file_id cannot be empty.", error_subcode="PAYLOAD_VALIDATION")
+
+    try:
+        file_record = database.get_file_record(file_id=file_id, tenant_id=tenant_id)
+        if file_record is None:
+            return _error("NOT_FOUND", "File not found for this tenant.", error_subcode="FILE_NOT_FOUND")
+
+        vector_store.delete_file_chunks(tenant_id=tenant_id, file_id=file_id)
+
+        storage_path = str(file_record["storage_path"] or "")
+        if storage_path and not storage_path.startswith("transient://"):
+            ingestion.delete_saved_file(Path(storage_path))
+
+        database.delete_file_record(file_id, tenant_id=tenant_id)
+
+        return RAGDeleteSuccess(file_id=file_id, status="deleted")
+    except Exception:
+        return _error(
+            "INTERNAL_ERROR",
+            "Failed to delete file.",
             error_subcode="UNEXPECTED_EXCEPTION",
         )
 

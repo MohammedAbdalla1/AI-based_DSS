@@ -83,3 +83,29 @@ class NarrateSectionRequest(BaseModel):
 class NarrateSectionSuccess(BaseModel):
     status: Literal["success"]
     narrative: str
+
+
+# ── Narrate Report (batched) ──────────────────────────────────────────────────
+
+class NarrateReportSectionInput(BaseModel):
+    heading: str = Field(..., min_length=1)
+    sql: Optional[str] = None
+    chart_type: Optional[str] = None
+    sample_rows_json: str = Field(default="[]")
+
+
+class NarrateReportRequest(BaseModel):
+    user_prompt: str = Field(..., min_length=1)
+    title: str = Field(..., min_length=1)
+    summary: Optional[str] = None
+    sections: List[NarrateReportSectionInput] = Field(..., min_length=1, max_length=8)
+
+
+class NarratedSection(BaseModel):
+    heading: str
+    narrative: str
+
+
+class NarrateReportSuccess(BaseModel):
+    status: Literal["success"]
+    sections: List[NarratedSection]

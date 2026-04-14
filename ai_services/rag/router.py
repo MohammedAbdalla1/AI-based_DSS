@@ -6,14 +6,14 @@ from __future__ import annotations
 
 import json
 
-from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Query, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from config import get_settings, load_environment
 
-from .models import RAGError, RAGIngestResponse, RAGQueryRequest, RAGQueryResponse
-from .service import run_rag_ingest, run_rag_query
+from .models import RAGDeleteResponse, RAGError, RAGIngestResponse, RAGQueryRequest, RAGQueryResponse
+from .service import run_rag_delete_file, run_rag_ingest, run_rag_query
 
 
 load_environment()
@@ -183,3 +183,33 @@ async def ingest_rag_legacy_alias(
     _: None = Depends(verify_internal_key),
 ):
     return await ingest_rag(file, tenant_id, uploaded_by, uploader_role, allowed_roles, metadata, _)
+
+
+@router.delete(
+    "/api/rag/files/{file_id}",
+    response_model=RAGDeleteResponse,
+    responses={
+        400: {"model": RAGError, "description": "Invalid request"},
+        401: {"model": RAGError, "description": "Unauthorized"},
+        404: {"model": RAGError, "description": "File not found"},
+        500: {"model": RAGError, "description": "Delete failure"},
+    },
+)
+def delete_rag_file(
+    file_id: str,
+    tenant_id: str = Query(..., description="Tenant id that owns this file."),
+    _: None = Depends(verify_internal_key),
+):
+    result = run_rag_delete_file(tenant_id=tenant_id, file_id=file_id)
+    if isinstance(result, RAGError):
+        return JSONResponse(status_code=_status_for_error(result), content=result.model_dump())
+    return result
+
+
+@router.delete("/rag/files/{file_id}", include_in_schema=False)
+def delete_rag_file_legacy_alias(
+    file_id: str,
+    tenant_id: str = Query(...),
+    _: None = Depends(verify_internal_key),
+):
+    return delete_rag_file(file_id=file_id, tenant_id=tenant_id, _=_)
