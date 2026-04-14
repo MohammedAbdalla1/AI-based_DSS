@@ -102,11 +102,11 @@ Return your response as a JSON array with exactly this structure (no markdown, n
     "chart_config": {{
       "xAxis": "column_name_for_x_axis",
       "yAxis": ["column_name_for_y_axis"],
-      "colors": ["#0ea5e9"],
+      "colors": ["#f97316", "#0ea5e9", "#22c55e", "#f43f5e"],
       "labelKey": "column_for_pie_labels",
       "valueKey": "column_for_pie_values"
     }},
-    "insight": "2-4 sentence analysis of what this chart reveals about the data, including potential trends, outliers, or business implications the user should pay attention to."
+    "insight": "A detailed 6-10 line insight in simple business language, including key numbers, trends, likely causes, risks/opportunities, and practical next actions."
   }}
 ]
 
@@ -121,8 +121,22 @@ chart_config rules:
 - For radar: include "xAxis" (the spoke/category label column) and "yAxis" (array of metric columns)
 - For composed: include "xAxis", "barKeys" (array of columns for bars), "lineKeys" (array of columns for lines)
 - For treemap/funnel: include "labelKey" (category/stage name) and "valueKey" (size/count metric)
-- "colors" is optional, provide hex colors matching the number of datasets/series
+- "colors" is optional, but when you provide it use a diverse palette with distinct hues
+- Avoid using the same single light-blue color for every chart
+- Prefer semantic coloring when meaningful: higher values toward green, lower values toward red
+- For multi-series charts: provide one distinct color per series
+- For single-series category charts: provide 4-8 colors so categories can be visually distinguished
 - Column names in chart_config MUST match the aliases used in the SQL SELECT clause
+
+insight rules:
+- The "insight" field is REQUIRED for every suggestion
+- Write 6-10 lines (each line should be a short sentence separated by a newline)
+- Include concrete numbers from the query output when possible
+- Explain why the pattern might be happening (business drivers)
+- Mention at least one risk and one opportunity
+- End with 2-3 practical recommendations the user can act on
+- Keep wording simple for non-technical small-business users
+- Do not use markdown or bullet points inside insight text
 
 Database schema:
 {schema_text}
