@@ -34,7 +34,7 @@ class PlanReportRequest(BaseModel):
         ..., min_length=3, description="What the user wants the report to cover."
     )
     max_sections: int = Field(
-        default=5, ge=1, le=8, description="Maximum number of sections to plan."
+        default=5, ge=1, le=9, description="Maximum number of sections to plan."
     )
 
     @field_validator("role_schema")
