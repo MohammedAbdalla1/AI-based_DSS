@@ -7,11 +7,16 @@ from __future__ import annotations
 import os
 from typing import Iterable
 
-from config import get_settings, load_environment
+from config import get_settings
+from llm_clients import (
+    ProviderCallError,
+    call_groq_completion,
+    get_gemini_client,
+    should_fallback_to_groq,
+)
 
 
 FALLBACK_ANSWER = "I don't know based on the authorized documents."
-_client = None
 
 
 class GeminiRAGError(Exception):
@@ -24,27 +29,15 @@ def _rag_error(subcode: str, message: str) -> GeminiRAGError:
     return GeminiRAGError(message=message, subcode=subcode)
 
 
-def _get_client():
-    global _client
-    if _client is not None:
-        return _client
+def _groq_model() -> str:
+    return os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile").strip() or "llama-3.3-70b-versatile"
 
-    load_environment()
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        raise _rag_error("MISSING_API_KEY", "GEMINI_API_KEY is missing")
 
+def _get_gemini_client():
     try:
-        from google import genai
-
-        _client = genai.Client(api_key=api_key)
-    except Exception as exc:
-        raise _rag_error(
-            "CLIENT_INIT_FAILED",
-            f"Gemini client initialization failed: {type(exc).__name__}",
-        ) from exc
-
-    return _client
+        return get_gemini_client()
+    except ProviderCallError as exc:
+        raise _rag_error(exc.subcode, str(exc)) from exc
 
 
 def embed_texts(texts: Iterable[str]) -> list[list[float]]:
@@ -53,7 +46,7 @@ def embed_texts(texts: Iterable[str]) -> list[list[float]]:
         raise _rag_error("EMPTY_INPUT", "Embedding input is empty.")
 
     settings = get_settings()
-    client = _get_client()
+    client = _get_gemini_client()
     try:
         response = client.models.embed_content(
             model=settings.rag_embedding_model,
@@ -95,17 +88,9 @@ def build_answer_prompt(question: str, contexts: list[str]) -> str:
     )
 
 
-def generate_answer(question: str, contexts: list[str]) -> str:
-    answer, _ = generate_answer_with_usage(question, contexts)
-    return answer
-
-
-def generate_answer_with_usage(question: str, contexts: list[str]) -> tuple[str, int]:
-    if not contexts:
-        return FALLBACK_ANSWER, 0
-
+def _generate_answer_with_gemini(question: str, contexts: list[str]) -> tuple[str, int]:
     settings = get_settings()
-    client = _get_client()
+    client = _get_gemini_client()
     prompt = build_answer_prompt(question, contexts)
 
     try:
@@ -127,6 +112,51 @@ def generate_answer_with_usage(question: str, contexts: list[str]) -> tuple[str,
     answer = text.strip()
     if not answer:
         raise _rag_error("EMPTY_RESPONSE", "Gemini returned an empty answer.")
+
     usage = getattr(response, "usage_metadata", None)
     total_tokens = int(getattr(usage, "total_token_count", 0) or 0)
     return answer, total_tokens
+
+
+def _generate_answer_with_groq(question: str, contexts: list[str]) -> tuple[str, int]:
+    prompt = build_answer_prompt(question, contexts)
+    try:
+        text, response = call_groq_completion(
+            prompt,
+            model=_groq_model(),
+            temperature=0.1,
+            max_completion_tokens=8192,
+        )
+    except ProviderCallError as exc:
+        raise _rag_error(exc.subcode, str(exc)) from exc
+
+    usage = getattr(response, "usage", None)
+    total_tokens = int(getattr(usage, "total_tokens", 0) or 0)
+    if total_tokens <= 0:
+        total_tokens = int(getattr(usage, "total_token_count", 0) or 0)
+    return text, total_tokens
+
+
+def generate_answer(question: str, contexts: list[str]) -> str:
+    answer, _ = generate_answer_with_usage(question, contexts)
+    return answer
+
+
+def generate_answer_with_usage(question: str, contexts: list[str]) -> tuple[str, int]:
+    if not contexts:
+        return FALLBACK_ANSWER, 0
+
+    try:
+        return _generate_answer_with_gemini(question, contexts)
+    except GeminiRAGError as gemini_exc:
+        if not should_fallback_to_groq(gemini_exc.subcode):
+            raise
+
+        try:
+            answer, tokens_used = _generate_answer_with_groq(question, contexts)
+            return answer, tokens_used
+        except GeminiRAGError as groq_exc:
+            raise _rag_error(
+                gemini_exc.subcode if gemini_exc.subcode != "UNKNOWN" else groq_exc.subcode,
+                f"{gemini_exc} | Groq fallback failed: {groq_exc}",
+            ) from groq_exc

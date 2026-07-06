@@ -3,6 +3,7 @@ import os
 import re
 from dataclasses import dataclass
 from typing import Optional
+
 from google import genai
 
 
@@ -41,7 +42,6 @@ def _parse_json_response(text: str) -> Optional[GenerationResult]:
     """Try to parse the LLM response as JSON with sql + explanation fields."""
     raw = text.strip()
 
-    # Strip markdown fences if present
     fenced = re.match(r"^```(?:json)?\s*([\s\S]*?)\s*```$", raw, flags=re.IGNORECASE)
     if fenced:
         raw = fenced.group(1).strip()
@@ -106,12 +106,10 @@ def generate_sql(prompt: str) -> GenerationResult:
     if not isinstance(text, str):
         raise _generation_error("INVALID_RESPONSE_TYPE", "Invalid response type from LLM")
 
-    # Try JSON parsing first (new prompt format)
     json_result = _parse_json_response(text)
     if json_result:
         return json_result
 
-    # Fallback: treat the whole response as raw SQL (backward compatibility)
     normalized = _normalize_model_sql_text(text)
     if not normalized:
         raise _generation_error("EMPTY_RESPONSE", "Empty response from LLM")

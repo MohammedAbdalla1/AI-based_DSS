@@ -69,7 +69,7 @@ def main() -> int:
     try:
         request = TextToSQLRequest(**DEFAULT_PAYLOAD)
         prompt = build_sql_prompt(request.question, request.role_schema, request.db_type)
-        generated_sql = generate_sql(prompt)
+        generated_sql = generate_sql(prompt).sql
 
         print("\nGenerated SQL (raw from Gemini):")
         print(generated_sql)

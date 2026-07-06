@@ -34,8 +34,8 @@ def reset_client_cache():
 def _run_pipeline(payload: dict) -> str:
     req = TextToSQLRequest(**payload)
     prompt = build_sql_prompt(req.question, req.role_schema, req.db_type)
-    generated_sql = generate_sql(prompt)
-    return validate_sql(generated_sql, req.role_schema, req.db_type)
+    generated = generate_sql(prompt)
+    return validate_sql(generated.sql, req.role_schema, req.db_type)
 
 
 def test_pipeline_success(monkeypatch):

@@ -78,7 +78,7 @@ def test_generate_sql_success(monkeypatch):
 
     sql = sg.generate_sql("list all users")
 
-    assert sql == "SELECT id FROM users"
+    assert sql.sql == "SELECT id FROM users"
     assert len(calls) == 1
     assert calls[0]["model"] == "models/gemini-2.5-flash"
     assert calls[0]["contents"] == "list all users"

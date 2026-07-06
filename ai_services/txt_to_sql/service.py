@@ -147,6 +147,23 @@ def _sanitize_sql_locally(sql: str) -> str:
     return cleaned.strip()
 
 
+def _coerce_generation_result(value: object) -> GenerationResult:
+    if isinstance(value, GenerationResult):
+        return value
+
+    sql_text = getattr(value, "sql", None)
+    if isinstance(sql_text, str):
+        explanation = getattr(value, "explanation", None)
+        if explanation is not None and not isinstance(explanation, str):
+            explanation = str(explanation)
+        return GenerationResult(sql=sql_text, explanation=explanation)
+
+    if isinstance(value, str):
+        return GenerationResult(sql=value, explanation=None)
+
+    raise TypeError(f"Unsupported generation result type: {type(value).__name__}")
+
+
 def _build_validation_retry_prompt(base_prompt: str, reason: str) -> str:
     return (
         f"{base_prompt}\n\n"
@@ -164,7 +181,7 @@ def _generate_sql_with_retry(prompt: str) -> tuple[Optional[GenerationResult], O
     while True:
         attempt += 1
         try:
-            return generate_sql(prompt_to_use), None
+            return _coerce_generation_result(generate_sql(prompt_to_use)), None
         except SQLGenerationError as exc:
             subcode = _classify_generation_error(exc)
             policy = GENERATION_RETRY_MATRIX.get(subcode, RetryPolicy(max_attempts=1))

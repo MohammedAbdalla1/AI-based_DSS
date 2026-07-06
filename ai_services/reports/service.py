@@ -14,7 +14,7 @@ import re
 import time
 from typing import Any, Dict, List, Optional
 
-from google import genai
+from llm_clients import ProviderCallError, call_groq_text, get_gemini_client, should_fallback_to_groq
 
 from .models import (
     NarratedSection,
@@ -37,9 +37,8 @@ from txt_to_sql.sql_generator import SQLGenerationError
 logger = logging.getLogger(__name__)
 
 
-# ── Gemini client (cached, with retry) ────────────────────────────────────────
+# ── Gemini retry state ────────────────────────────────────────────────────────
 
-_gemini_client: Optional[genai.Client] = None
 _provider_limit_until_monotonic: float = 0.0
 _model_unavailable_until_monotonic: Dict[str, float] = {}
 
@@ -107,6 +106,13 @@ def _narrate_models() -> List[str]:
     )
 
 
+def _groq_model() -> str:
+    raw = os.getenv("REPORTS_GROQ_MODEL", "").strip()
+    if raw:
+        return raw
+    return os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile").strip() or "llama-3.3-70b-versatile"
+
+
 def _is_provider_limited_now() -> bool:
     return time.monotonic() < _provider_limit_until_monotonic
 
@@ -159,21 +165,11 @@ def _is_transient_provider_error(exc: Exception) -> bool:
     }
 
 
-def _get_gemini_client() -> genai.Client:
-    global _gemini_client
-    if _gemini_client is not None:
-        return _gemini_client
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        raise SQLGenerationError("GEMINI_API_KEY is missing", subcode="MISSING_API_KEY")
+def _get_gemini_client() -> object:
     try:
-        _gemini_client = genai.Client(api_key=api_key)
-    except Exception as e:
-        raise SQLGenerationError(
-            f"Gemini client init failed: {type(e).__name__}",
-            subcode="CLIENT_INIT_FAILED",
-        ) from e
-    return _gemini_client
+        return get_gemini_client()
+    except ProviderCallError as exc:
+        raise SQLGenerationError(str(exc), subcode=exc.subcode) from exc
 
 
 def _generate_text_with_retry(
@@ -292,6 +288,68 @@ def _generate_text_with_retry(
     )
 
 
+def _generate_text_with_groq(
+    prompt: str,
+    *,
+    model: str,
+    max_output_tokens: int = 8192,
+    temperature: float = 0.2,
+) -> str:
+    try:
+        return call_groq_text(
+            prompt,
+            model=model,
+            temperature=temperature,
+            max_completion_tokens=max_output_tokens,
+        )
+    except ProviderCallError as exc:
+        raise SQLGenerationError(
+            f"Groq generation failed: {type(exc).__name__}",
+            subcode=exc.subcode,
+        ) from exc
+
+
+def _generate_text_with_fallback(
+    prompt: str,
+    *,
+    model: Optional[str] = None,
+    models: Optional[List[str]] = None,
+    max_output_tokens: int = 8192,
+    temperature: float = 0.2,
+    attempts: int = 2,
+) -> str:
+    try:
+        return _generate_text_with_retry(
+            prompt,
+            model=model,
+            models=models,
+            max_output_tokens=max_output_tokens,
+            temperature=temperature,
+            attempts=attempts,
+        )
+    except SQLGenerationError as gemini_exc:
+        if not should_fallback_to_groq(gemini_exc.subcode):
+            raise
+
+        groq_error: Optional[SQLGenerationError] = None
+        try:
+            return _generate_text_with_groq(
+                prompt,
+                model=_groq_model(),
+                max_output_tokens=max_output_tokens,
+                temperature=temperature,
+            )
+        except SQLGenerationError as exc:
+            groq_error = exc
+
+        assert groq_error is not None
+        subcode = gemini_exc.subcode if gemini_exc.subcode != "UNKNOWN" else groq_error.subcode
+        raise SQLGenerationError(
+            f"{gemini_exc} | Groq fallback failed: {groq_error}",
+            subcode=subcode,
+        ) from groq_error
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _error(error_code: str, message: str) -> ReportAiError:
@@ -383,7 +441,7 @@ def run_plan_report(request: PlanReportRequest) -> PlanReportSuccess | ReportAiE
             max_sections=request.max_sections,
         )
 
-        text = _generate_text_with_retry(
+        text = _generate_text_with_fallback(
             prompt,
             models=_plan_models(),
             attempts=_attempts_per_model("REPORTS_PLAN_ATTEMPTS_PER_MODEL", 2),
@@ -454,7 +512,7 @@ def run_narrate_section(request: NarrateSectionRequest) -> NarrateSectionSuccess
             sample_rows_json=request.sample_rows_json,
         )
 
-        text = _generate_text_with_retry(
+        text = _generate_text_with_fallback(
             prompt,
             models=_narrate_models(),
             attempts=_attempts_per_model("REPORTS_NARRATE_ATTEMPTS_PER_MODEL", 2),
@@ -538,7 +596,7 @@ def run_narrate_report(request: NarrateReportRequest) -> NarrateReportSuccess | 
             sections=narratable_payload,
         )
 
-        text = _generate_text_with_retry(
+        text = _generate_text_with_fallback(
             prompt,
             models=_narrate_models(),
             attempts=_attempts_per_model("REPORTS_NARRATE_ATTEMPTS_PER_MODEL", 2),

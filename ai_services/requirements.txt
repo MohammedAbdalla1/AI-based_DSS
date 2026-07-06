@@ -2,6 +2,7 @@ fastapi
 uvicorn
 pydantic
 google-genai
+groq
 python-dotenv
 sqlglot
 langchain
